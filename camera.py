@@ -1,7 +1,9 @@
 import time
 
 import math
-from cv2.cv import ShowImage
+
+import numpy
+from cv2.cv import ShowImage, LogPolar, CV_WARP_FILL_OUTLIERS, fromarray
 from picamera import PiCamera
 from picamera.array import PiYUVArray
 import time
@@ -24,8 +26,8 @@ with PiCamera() as cam:
     # allow the camera to warmup
     time.sleep(0.1)
 
-    # cv2.namedWindow("In", cv2.WINDOW_NORMAL)
-    # cv2.resizeWindow("In", PREVIEW_RES[0], PREVIEW_RES[1])
+    cv2.namedWindow("In", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("In", PREVIEW_RES[0], PREVIEW_RES[1])
     # cv2.namedWindow("Middle", cv2.WINDOW_NORMAL)
     # cv2.resizeWindow("Middle", PREVIEW_RES[0], PREVIEW_RES[1])
     # cv2.namedWindow("Out", cv2.WINDOW_NORMAL)
@@ -33,99 +35,81 @@ with PiCamera() as cam:
     cv2.namedWindow("Out2", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Out2", PREVIEW_RES[0], PREVIEW_RES[1])
 
+    polar = cv2.cv.CreateMat(180, 180, cv2.cv.CV_8U)
+    rotate90 = cv2.getRotationMatrix2D((90, 90), 90, 1)
+
+    trace = numpy.zeros(shape=(180, 180), dtype=numpy.uint8)
+    rot_integ = numpy.zeros(shape=(360,), dtype=numpy.uint8)
+
+    window_fn = numpy.arange(1.0, 41) / 40.0
+
+    heading = None
+
     # capture frames from the camera
     last_time = time.time()
     for frame in cam.capture_continuous(rawCapture, format="yuv", use_video_port=True):
         # Get the Y component.
-        image = frame.array[..., 0] # .copy()
-        #cv2.imshow("In", image)
-        #
-        # big_blur = cv2.GaussianBlur(image, (101, 101), 0)
-        # cv2.imshow("Middle", big_blur)
-        # image = cv2.subtract(image, big_blur / 2)
-        #
-        # blur = cv2.GaussianBlur(image, (5, 5), 0)
-        thr2 = cv2.adaptiveThreshold(image, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                     cv2.THRESH_BINARY, 101, 10)
-        #cv2.imshow("Out", thr2)
-        blurred_thr = cv2.GaussianBlur(thr2, (21, 21), 0)
-        image2 = cv2.add(blurred_thr / 4, image)
-        #cv2.imshow("Middle", image2)
+        image = frame.array[..., 0].copy()
+        image2 = fromarray(image)
 
-        thr3 = cv2.adaptiveThreshold(image2, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                     cv2.THRESH_BINARY, 101, 10)
-        # cv2.imshow("Out2", thr3)
+        LogPolar(image2, polar, (W/2, H/2), 50)
+        image3 = numpy.asarray(polar)
 
-        blurred = cv2.GaussianBlur(thr3, (31, 31), 0)
+        integ = numpy.sum(image3, 1)
+        min = numpy.min(integ)
+        max = numpy.max(integ)
+        integ = (integ - min) * 255 / (1 + max - min)
+        integ2 = integ.astype(numpy.uint8)
 
-        key = cv2.waitKey(1) & 0xFF
+        rot_integ[:135] = integ2[45:]
+        rot_integ[135:180] = integ2[:45]
+        rot_integ[180:] = rot_integ[:180]
 
-        # Top left of image is (0, 0).
-        darkest_x = None
-        darkest_val = 256
-        for x in xrange(W):
-            v = blurred[H-5, x]
-            if v < darkest_val:
-                darkest_val = v
-                darkest_x = x
+        trace[:-1, :] = trace[1:,:]
+        trace[-1, :] = rot_integ[:180]
 
-        def get_pix(pix_x, pix_y):
-            if 0 <= pix_x < W and 0 <= pix_y < H:
-                return blurred[int(pix_y), int(pix_x)]
+        if heading is None:
+            # haven't locked onto line yet
+            min_idx = numpy.argmin(rot_integ)
+            heading = min_idx
+        else:
+            window_min = heading - 20
+            window_max = heading + 20
+            if window_min < 0:
+                window_min += 180
+                window_max += 180
+            elif window_max >= 360:
+                window_min -= 180
+                window_max -= 180
+            window = rot_integ[window_min:window_max] * window_fn
+            min_idx = numpy.argmin(window) + window_min
+            if min_idx >= 180:
+                heading = min_idx - 180
+            else:
+                heading = min_idx
 
-        def set_pix(pix_x, pix_y, value):
-            if 0 <= pix_x < W and 0 <= pix_y < H:
-                blurred[pix_y, pix_x] = value
-
-        cur_x, cur_y = darkest_x, H-5
-        prev_x, prev_y = darkest_x, H
-
-        for i in xrange(40):
-            set_pix(cur_x, cur_y, 180)
-
-            d_x, d_y = cur_x - prev_x, cur_y - prev_y
-            d_x_sq, d_y_sq = d_x ** 2, d_y ** 2
-            norm = math.sqrt(d_x_sq + d_y_sq)
-            d_x, d_y = d_x / norm, d_y / norm
-
-            tap = 0
-            darkest_test_x = None
-            darkest_test_y = None
-            darkest_val = 256
-            for t_x, t_y in taps:
-                rot_t_x = t_x * d_x - t_y * d_y
-                rot_t_y = t_x * d_y + t_y * d_x
-
-                test_x = cur_x + 10 * rot_t_x
-                test_y = cur_y + 10 * rot_t_y
-
-                val = get_pix(test_x, test_y)
-                if val < darkest_val:
-                    darkest_test_x = test_x
-                    darkest_test_y = test_y
-                    darkest_val = val
-
-                tap += 1
-            prev_x, prev_y = cur_x, cur_y
-            for x in xrange(cur_x - 10, cur_x + 10):
-                for y in xrange(cur_y - 10, cur_y + 10):
-                    set_pix(x, y, 255)
-
-            cur_x, cur_y = int(darkest_test_x), int(darkest_test_y)
-            if not (0 <= cur_x < W and 0 <= cur_y < H):
-                break
+        trace[-2,heading] = 200
+        print heading
 
         now = time.time()
         frame_secs = now - last_time
         fps = 1 / frame_secs
-        cv2.putText(blurred, "%.1f" % fps, (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (20, 20, 20))
+        cv2.putText(image, "%.1f" % fps, (5, 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (20, 20, 20))
         last_time = now
 
-        cv2.imshow("Out2", blurred)
+        rads = 1.5 * math.pi - heading * 2 * math.pi / 180.0
+        x = math.cos(rads) * 20
+        y = math.sin(rads) * 20
+
+        cv2.line(image, (W/2, H/2), (int(x + W/2), int(H/2 - y)), (200,200,200), 1)
+
+        cv2.imshow("In", image)
+        cv2.imshow("Out2", trace)
 
         # clear the stream in preparation for the next frame
         rawCapture.truncate(0)
 
         # if the `q` key was pressed, break from the loop
+        key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
