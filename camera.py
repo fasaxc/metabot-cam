@@ -8,6 +8,7 @@ from picamera import PiCamera
 from picamera.array import PiYUVArray
 import time
 import cv2
+from scipy import signal
 
 CAM_RES = (128, 80)
 W = CAM_RES[0]
@@ -41,7 +42,9 @@ with PiCamera() as cam:
     trace = numpy.zeros(shape=(180, 180), dtype=numpy.uint8)
     rot_integ = numpy.zeros(shape=(360,), dtype=numpy.uint8)
 
-    window_fn = numpy.arange(1.0, 41) / 40.0
+    window_fn = numpy.zeros(shape=(40,))
+    for x in range(40):
+        window_fn[x] = 1.0 - ((20.0 - x) * (20.0 - x) / 800.0)
 
     heading = None
 
